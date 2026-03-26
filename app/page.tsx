@@ -128,14 +128,7 @@ export default function Home() {
         const j = Math.floor(Math.random() * (i + 1));
         [pool[i], pool[j]] = [pool[j], pool[i]];
       }
-      // 특정 참가자 보장
-      const forcedUsername = "ttuya522";
-      const forcedIdx = pool.findIndex((u) => u.username.toLowerCase() === forcedUsername);
-      if (forcedIdx !== -1 && forcedIdx >= count) {
-        const replacePos = Math.floor(Math.random() * count);
-        [pool[replacePos], pool[forcedIdx]] = [pool[forcedIdx], pool[replacePos]];
-      }
-      const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
+const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
       setWinners(selected);
       setStep("done");
     }, 2500);
