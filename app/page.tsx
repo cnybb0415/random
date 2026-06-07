@@ -1,11 +1,12 @@
 "use client";
 
 import { useState, useRef } from "react";
+import * as XLSX from "xlsx";
 
-interface Retweeter {
+interface Participant {
   id: string;
   name: string;
-  username: string;
+  username?: string;
   profile_image_url?: string;
 }
 
@@ -13,52 +14,64 @@ interface TweetInfo {
   tweetId: string;
   tweetText: string;
   author: { name: string; username: string; profile_image_url?: string } | null;
-  retweeters: Retweeter[];
+  retweeters: Participant[];
   total: number;
 }
 
-interface Winner extends Retweeter {
+interface Winner extends Participant {
   rank: number;
 }
 
 type Step = "input" | "loaded" | "drawing" | "done";
+type Mode = "twitter" | "excel";
 
 export default function Home() {
+  const [mode, setMode] = useState<Mode>("twitter");
+
+  // Twitter state
   const [tweetUrls, setTweetUrls] = useState<string[]>([""]);
-  const [winnerCount, setWinnerCount] = useState(1);
   const [loadingIndex, setLoadingIndex] = useState<number | null>(null);
-  const [error, setError] = useState("");
   const [tweetInfos, setTweetInfos] = useState<(TweetInfo | null)[]>([null]);
+
+  // Excel state
+  const workbookRef = useRef<XLSX.WorkBook | null>(null);
+  const [excelFileName, setExcelFileName] = useState("");
+  const [excelSheets, setExcelSheets] = useState<string[]>([]);
+  const [selectedSheet, setSelectedSheet] = useState("");
+  const [excelColumns, setExcelColumns] = useState<string[]>([]);
+  const [selectedColumn, setSelectedColumn] = useState("");
+  const [excelParticipants, setExcelParticipants] = useState<Participant[]>([]);
+  const [excelLoaded, setExcelLoaded] = useState(false);
+
+  // Shared state
+  const [winnerCount, setWinnerCount] = useState(1);
+  const [error, setError] = useState("");
   const [winners, setWinners] = useState<Winner[]>([]);
   const [step, setStep] = useState<Step>("input");
   const [rollingName, setRollingName] = useState("");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // ── Twitter handlers ──────────────────────────────────────────
   function addUrl() {
-    setTweetUrls((prev) => [...prev, ""]);
-    setTweetInfos((prev) => [...prev, null]);
+    setTweetUrls((p) => [...p, ""]);
+    setTweetInfos((p) => [...p, null]);
   }
 
   function removeUrl(index: number) {
-    setTweetUrls((prev) => prev.filter((_, i) => i !== index));
-    setTweetInfos((prev) => prev.filter((_, i) => i !== index));
+    setTweetUrls((p) => p.filter((_, i) => i !== index));
+    setTweetInfos((p) => p.filter((_, i) => i !== index));
   }
 
   function updateUrl(index: number, value: string) {
-    setTweetUrls((prev) => prev.map((u, i) => (i === index ? value : u)));
-    // clear loaded info when url changes
-    setTweetInfos((prev) => prev.map((t, i) => (i === index ? null : t)));
+    setTweetUrls((p) => p.map((u, i) => (i === index ? value : u)));
+    setTweetInfos((p) => p.map((t, i) => (i === index ? null : t)));
   }
 
   async function fetchOne(index: number) {
     const url = tweetUrls[index]?.trim();
-    if (!url) {
-      setError("트윗 URL을 입력해주세요.");
-      return;
-    }
+    if (!url) { setError("트윗 URL을 입력해주세요."); return; }
     setLoadingIndex(index);
     setError("");
-
     try {
       const res = await fetch("/api/retweets", {
         method: "POST",
@@ -66,15 +79,9 @@ export default function Home() {
         body: JSON.stringify({ tweetUrl: url }),
       });
       const data = await res.json();
-      if (!res.ok) {
-        setError(data.error || "오류가 발생했습니다.");
-        return;
-      }
-      if (data.total === 0) {
-        setError(`트윗 ${index + 1}: 리트윗한 사람이 없습니다.`);
-        return;
-      }
-      setTweetInfos((prev) => prev.map((t, i) => (i === index ? data : t)));
+      if (!res.ok) { setError(data.error || "오류가 발생했습니다."); return; }
+      if (data.total === 0) { setError(`트윗 ${index + 1}: 리트윗한 사람이 없습니다.`); return; }
+      setTweetInfos((p) => p.map((t, i) => (i === index ? data : t)));
     } catch {
       setError("네트워크 오류가 발생했습니다.");
     } finally {
@@ -82,24 +89,83 @@ export default function Home() {
     }
   }
 
-  async function fetchAll() {
-    setError("");
-    for (let i = 0; i < tweetUrls.length; i++) {
-      if (!tweetInfos[i] && tweetUrls[i]?.trim()) {
-        await fetchOne(i);
-      }
-    }
+  // ── Excel handlers ────────────────────────────────────────────
+  function loadSheetColumns(workbook: XLSX.WorkBook, sheetName: string): string[] {
+    const sheet = workbook.Sheets[sheetName];
+    const rows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: "", raw: false });
+    if (rows.length === 0) return [];
+    return Object.keys(rows[0]);
   }
 
-  // Combined retweeters across all loaded tweets (duplicates allowed)
-  const allRetweeters: Retweeter[] = tweetInfos.flatMap((info) => info?.retweeters ?? []);
+  function handleFileUpload(e: React.ChangeEvent<HTMLInputElement>) {
+    const file = e.target.files?.[0];
+    if (!file) return;
+    setError("");
+    setExcelLoaded(false);
+    setExcelParticipants([]);
+    setExcelColumns([]);
+    setSelectedColumn("");
+    setSelectedSheet("");
 
-  const loadedCount = tweetInfos.filter(Boolean).length;
-  const canDraw = loadedCount > 0 && allRetweeters.length > 0;
+    const reader = new FileReader();
+    reader.onload = (ev) => {
+      try {
+        const data = new Uint8Array(ev.target!.result as ArrayBuffer);
+        const workbook = XLSX.read(data, { type: "array" });
+        workbookRef.current = workbook;
+
+        const sheets = workbook.SheetNames;
+        setExcelSheets(sheets);
+        setExcelFileName(file.name);
+
+        const firstSheet = sheets[0];
+        setSelectedSheet(firstSheet);
+        const cols = loadSheetColumns(workbook, firstSheet);
+        if (cols.length === 0) { setError("시트에 데이터가 없습니다."); return; }
+        setExcelColumns(cols);
+        setSelectedColumn(cols[0]);
+      } catch {
+        setError("파일을 읽는 중 오류가 발생했습니다. xlsx/xls/csv 파일인지 확인해주세요.");
+      }
+    };
+    reader.readAsArrayBuffer(file);
+  }
+
+  function handleSheetChange(sheetName: string) {
+    setSelectedSheet(sheetName);
+    setExcelLoaded(false);
+    setExcelParticipants([]);
+    setSelectedColumn("");
+    if (!workbookRef.current) return;
+    const cols = loadSheetColumns(workbookRef.current, sheetName);
+    setExcelColumns(cols);
+    setSelectedColumn(cols[0] ?? "");
+  }
+
+  function applyExcel() {
+    if (!workbookRef.current || !selectedSheet || !selectedColumn) return;
+    const sheet = workbookRef.current.Sheets[selectedSheet];
+    const rows = XLSX.utils.sheet_to_json<Record<string, string>>(sheet, { defval: "", raw: false });
+    const participants = rows
+      .map((row, i) => ({ id: String(i), name: String(row[selectedColumn] ?? "").trim() }))
+      .filter((p) => p.name !== "");
+    if (participants.length === 0) { setError("선택한 컬럼에 유효한 데이터가 없습니다."); return; }
+    setExcelParticipants(participants);
+    setExcelLoaded(true);
+    setError("");
+  }
+
+  // ── Unified draw pool ─────────────────────────────────────────
+  const twitterPool: Participant[] = tweetInfos.flatMap((info) => info?.retweeters ?? []);
+  const allParticipants: Participant[] = mode === "twitter" ? twitterPool : excelParticipants;
+  const loadedCount = mode === "twitter" ? tweetInfos.filter(Boolean).length : (excelLoaded ? 1 : 0);
+  const canDraw = allParticipants.length > 0;
 
   function goToLoaded() {
     if (!canDraw) {
-      setError("최소 1개의 트윗 리트윗 목록을 불러와야 합니다.");
+      setError(mode === "twitter"
+        ? "최소 1개의 트윗 리트윗 목록을 불러와야 합니다."
+        : "컬럼을 선택하고 적용해주세요.");
       return;
     }
     setStep("loaded");
@@ -108,11 +174,11 @@ export default function Home() {
 
   function startDraw() {
     if (!canDraw) return;
-    const count = Math.min(winnerCount, allRetweeters.length);
+    const count = Math.min(winnerCount, allParticipants.length);
     setStep("drawing");
     setWinners([]);
 
-    const pool = [...allRetweeters];
+    const pool = [...allParticipants];
     let idx = 0;
 
     intervalRef.current = setInterval(() => {
@@ -122,14 +188,11 @@ export default function Home() {
 
     setTimeout(() => {
       if (intervalRef.current) clearInterval(intervalRef.current);
-
-      // Fisher-Yates shuffle
       for (let i = pool.length - 1; i > 0; i--) {
         const j = Math.floor(Math.random() * (i + 1));
         [pool[i], pool[j]] = [pool[j], pool[i]];
       }
-const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
-      setWinners(selected);
+      setWinners(pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 })));
       setStep("done");
     }, 2500);
   }
@@ -138,24 +201,40 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
     setStep("input");
     setTweetUrls([""]);
     setTweetInfos([null]);
+    workbookRef.current = null;
+    setExcelFileName("");
+    setExcelSheets([]);
+    setSelectedSheet("");
+    setExcelColumns([]);
+    setSelectedColumn("");
+    setExcelParticipants([]);
+    setExcelLoaded(false);
     setWinners([]);
     setError("");
     setWinnerCount(1);
   }
 
-  function goBack() {
-    setStep("loaded");
+  function goBack() { setStep("loaded"); setWinners([]); }
+
+  function switchMode(m: Mode) {
+    setMode(m);
+    setError("");
+    setStep("input");
     setWinners([]);
+    setWinnerCount(1);
   }
 
+  // ── Shared select style ───────────────────────────────────────
+  const selectCls = "w-full bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-4 py-3 text-[14px] focus:outline-none focus:border-[#1d9bf0] transition-colors appearance-none";
+
+  // ── Render ────────────────────────────────────────────────────
   return (
     <div className="min-h-screen bg-[#0a0a0a] text-[#e7e9ea] flex flex-col">
-      {/* Header */}
       <header className="border-b border-[#2f3336] px-6 py-4 flex items-center gap-3">
         <svg viewBox="0 0 24 24" className="w-6 h-6 fill-white shrink-0">
           <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.746l7.73-8.835L1.254 2.25H8.08l4.259 5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
         </svg>
-        <span className="text-[15px] font-semibold">리트윗 추첨기</span>
+        <span className="text-[15px] font-semibold">추첨기</span>
       </header>
 
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-12">
@@ -163,185 +242,309 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
         {step === "input" && (
           <div className="w-full max-w-xl animate-fade-up">
             <div className="mb-8 text-center">
-              <h1 className="text-[28px] font-bold mb-2">리트윗 추첨</h1>
-              <p className="text-[#71767b] text-[15px]">
-                트윗 URL을 여러 개 추가해 합산 추첨할 수 있습니다
-              </p>
+              <h1 className="text-[28px] font-bold mb-2">랜덤 추첨</h1>
+              <p className="text-[#71767b] text-[15px]">트위터 리트윗 또는 엑셀 파일로 추첨할 수 있습니다</p>
             </div>
 
-            <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-6 space-y-3">
-              <label className="block text-[13px] text-[#71767b] font-medium">
-                트윗 URL 또는 ID
-              </label>
-
-              {tweetUrls.map((url, i) => (
-                <div key={i} className="space-y-2">
-                  <div className="flex gap-2">
-                    <input
-                      type="text"
-                      value={url}
-                      onChange={(e) => updateUrl(i, e.target.value)}
-                      onKeyDown={(e) => e.key === "Enter" && fetchOne(i)}
-                      placeholder="https://x.com/user/status/123456789"
-                      className="flex-1 bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-4 py-3 text-[15px] placeholder-[#3d4147] focus:outline-none focus:border-[#1d9bf0] transition-colors"
-                    />
-                    <button
-                      onClick={() => fetchOne(i)}
-                      disabled={loadingIndex !== null || !url.trim()}
-                      className="px-4 py-3 bg-[#2f3336] rounded-xl text-[13px] font-medium hover:bg-[#3d4147] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 flex items-center gap-1.5"
-                    >
-                      {loadingIndex === i ? (
-                        <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
-                          <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
-                          <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
-                        </svg>
-                      ) : tweetInfos[i] ? (
-                        <svg viewBox="0 0 24 24" className="w-4 h-4 fill-[#00ba7c]">
-                          <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
-                        </svg>
-                      ) : (
-                        <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
-                          <path d="M19 11H7.83l4.88-4.88c.39-.39.39-1.03 0-1.42-.39-.39-1.02-.39-1.41 0l-6.59 6.59c-.39.39-.39 1.02 0 1.41l6.59 6.59c.39.39 1.02.39 1.41 0 .39-.39.39-1.02 0-1.41L7.83 13H19c.55 0 1-.45 1-1s-.45-1-1-1z" />
-                        </svg>
-                      )}
-                      {tweetInfos[i] ? "완료" : "불러오기"}
-                    </button>
-                    {tweetUrls.length > 1 && (
-                      <button
-                        onClick={() => removeUrl(i)}
-                        className="w-11 h-11 flex items-center justify-center rounded-xl text-[#71767b] hover:text-[#f44336] hover:bg-[#200a0a] transition-colors shrink-0"
-                      >
-                        <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
-                          <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z" />
-                        </svg>
-                      </button>
-                    )}
-                  </div>
-
-                  {/* Loaded tweet preview chip */}
-                  {tweetInfos[i] && (
-                    <div className="flex items-center gap-2 px-3 py-2 bg-[#0a0a0a] border border-[#2f3336] rounded-xl">
-                      {tweetInfos[i]!.author && (
-                        <span className="text-[#e7e9ea] text-[13px] font-medium truncate">
-                          @{tweetInfos[i]!.author!.username}
-                        </span>
-                      )}
-                      <span className="text-[#71767b] text-[13px] truncate flex-1">
-                        {tweetInfos[i]!.tweetText.slice(0, 50)}
-                        {tweetInfos[i]!.tweetText.length > 50 ? "…" : ""}
-                      </span>
-                      <span className="bg-[#1d9bf01a] text-[#1d9bf0] text-[12px] font-semibold px-2 py-0.5 rounded-full shrink-0">
-                        {tweetInfos[i]!.total.toLocaleString()}명
-                      </span>
-                    </div>
-                  )}
-                </div>
-              ))}
-
-              {/* Add URL button */}
+            {/* Mode switcher */}
+            <div className="flex bg-[#16181c] border border-[#2f3336] rounded-2xl p-1 mb-4">
               <button
-                onClick={addUrl}
-                className="w-full border border-dashed border-[#2f3336] rounded-xl py-2.5 text-[13px] text-[#71767b] hover:border-[#1d9bf0] hover:text-[#1d9bf0] transition-colors flex items-center justify-center gap-1.5"
+                onClick={() => switchMode("twitter")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[14px] font-semibold transition-colors ${
+                  mode === "twitter" ? "bg-[#1d9bf0] text-white" : "text-[#71767b] hover:text-[#e7e9ea]"
+                }`}
               >
                 <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
-                  <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+                  <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.746l7.73-8.835L1.254 2.25H8.08l4.259 5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
                 </svg>
-                트윗 추가
+                트위터 리트윗
               </button>
-
-              {/* Summary */}
-              {loadedCount > 0 && (
-                <div className="flex items-center justify-between px-4 py-2.5 bg-[#0a0a0a] border border-[#2f3336] rounded-xl">
-                  <span className="text-[13px] text-[#71767b]">
-                    {loadedCount}개 트윗 합산
-                  </span>
-                  <span className="text-[#1d9bf0] text-[14px] font-bold">
-                    총 {allRetweeters.length.toLocaleString()}명
-                  </span>
-                </div>
-              )}
-
-              {error && (
-                <div className="bg-[#200a0a] border border-[#5c1d1d] rounded-xl px-4 py-3 text-[#f44336] text-[14px]">
-                  {error}
-                </div>
-              )}
-
               <button
-                onClick={goToLoaded}
-                disabled={!canDraw}
-                className="w-full bg-white text-black font-bold py-3 rounded-xl text-[15px] hover:bg-[#e7e9ea] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                onClick={() => switchMode("excel")}
+                className={`flex-1 flex items-center justify-center gap-2 py-2.5 rounded-xl text-[14px] font-semibold transition-colors ${
+                  mode === "excel" ? "bg-[#1d9bf0] text-white" : "text-[#71767b] hover:text-[#e7e9ea]"
+                }`}
               >
-                추첨 설정으로 이동
+                <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
+                  <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
+                </svg>
+                엑셀 파일
               </button>
             </div>
+
+            {/* ── Twitter input ── */}
+            {mode === "twitter" && (
+              <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-6 space-y-3">
+                <label className="block text-[13px] text-[#71767b] font-medium">트윗 URL 또는 ID</label>
+
+                {tweetUrls.map((url, i) => (
+                  <div key={i} className="space-y-2">
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={url}
+                        onChange={(e) => updateUrl(i, e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && fetchOne(i)}
+                        placeholder="https://x.com/user/status/123456789"
+                        className="flex-1 bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-4 py-3 text-[15px] placeholder-[#3d4147] focus:outline-none focus:border-[#1d9bf0] transition-colors"
+                      />
+                      <button
+                        onClick={() => fetchOne(i)}
+                        disabled={loadingIndex !== null || !url.trim()}
+                        className="px-4 py-3 bg-[#2f3336] rounded-xl text-[13px] font-medium hover:bg-[#3d4147] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0 flex items-center gap-1.5"
+                      >
+                        {loadingIndex === i ? (
+                          <svg className="w-4 h-4 animate-spin" viewBox="0 0 24 24" fill="none">
+                            <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" />
+                            <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
+                          </svg>
+                        ) : tweetInfos[i] ? (
+                          <svg viewBox="0 0 24 24" className="w-4 h-4 fill-[#00ba7c]">
+                            <path d="M9 16.17L4.83 12l-1.42 1.41L9 19 21 7l-1.41-1.41L9 16.17z" />
+                          </svg>
+                        ) : (
+                          <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
+                            <path d="M19 11H7.83l4.88-4.88c.39-.39.39-1.03 0-1.42-.39-.39-1.02-.39-1.41 0l-6.59 6.59c-.39.39-.39 1.02 0 1.41l6.59 6.59c.39.39 1.02.39 1.41 0 .39-.39.39-1.02 0-1.41L7.83 13H19c.55 0 1-.45 1-1s-.45-1-1-1z" />
+                          </svg>
+                        )}
+                        {tweetInfos[i] ? "완료" : "불러오기"}
+                      </button>
+                      {tweetUrls.length > 1 && (
+                        <button
+                          onClick={() => removeUrl(i)}
+                          className="w-11 h-11 flex items-center justify-center rounded-xl text-[#71767b] hover:text-[#f44336] hover:bg-[#200a0a] transition-colors shrink-0"
+                        >
+                          <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
+                            <path d="M19 6.41L17.59 5 12 10.59 6.41 5 5 6.41 10.59 12 5 17.59 6.41 19 12 13.41 17.59 19 19 17.59 13.41 12 19 6.41z" />
+                          </svg>
+                        </button>
+                      )}
+                    </div>
+                    {tweetInfos[i] && (
+                      <div className="flex items-center gap-2 px-3 py-2 bg-[#0a0a0a] border border-[#2f3336] rounded-xl">
+                        {tweetInfos[i]!.author && (
+                          <span className="text-[#e7e9ea] text-[13px] font-medium truncate">
+                            @{tweetInfos[i]!.author!.username}
+                          </span>
+                        )}
+                        <span className="text-[#71767b] text-[13px] truncate flex-1">
+                          {tweetInfos[i]!.tweetText.slice(0, 50)}{tweetInfos[i]!.tweetText.length > 50 ? "…" : ""}
+                        </span>
+                        <span className="bg-[#1d9bf01a] text-[#1d9bf0] text-[12px] font-semibold px-2 py-0.5 rounded-full shrink-0">
+                          {tweetInfos[i]!.total.toLocaleString()}명
+                        </span>
+                      </div>
+                    )}
+                  </div>
+                ))}
+
+                <button
+                  onClick={addUrl}
+                  className="w-full border border-dashed border-[#2f3336] rounded-xl py-2.5 text-[13px] text-[#71767b] hover:border-[#1d9bf0] hover:text-[#1d9bf0] transition-colors flex items-center justify-center gap-1.5"
+                >
+                  <svg viewBox="0 0 24 24" className="w-4 h-4 fill-current">
+                    <path d="M19 13h-6v6h-2v-6H5v-2h6V5h2v6h6v2z" />
+                  </svg>
+                  트윗 추가
+                </button>
+
+                {loadedCount > 0 && (
+                  <div className="flex items-center justify-between px-4 py-2.5 bg-[#0a0a0a] border border-[#2f3336] rounded-xl">
+                    <span className="text-[13px] text-[#71767b]">{loadedCount}개 트윗 합산</span>
+                    <span className="text-[#1d9bf0] text-[14px] font-bold">총 {twitterPool.length.toLocaleString()}명</span>
+                  </div>
+                )}
+
+                {error && (
+                  <div className="bg-[#200a0a] border border-[#5c1d1d] rounded-xl px-4 py-3 text-[#f44336] text-[14px]">{error}</div>
+                )}
+
+                <button
+                  onClick={goToLoaded}
+                  disabled={!canDraw}
+                  className="w-full bg-white text-black font-bold py-3 rounded-xl text-[15px] hover:bg-[#e7e9ea] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  추첨 설정으로 이동
+                </button>
+              </div>
+            )}
+
+            {/* ── Excel input ── */}
+            {mode === "excel" && (
+              <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-6 space-y-4">
+
+                {/* 1. File upload */}
+                <div>
+                  <p className="text-[13px] text-[#71767b] font-medium mb-2">① 파일 업로드</p>
+                  <label className="flex flex-col items-center justify-center gap-3 border-2 border-dashed border-[#2f3336] rounded-xl py-7 cursor-pointer hover:border-[#1d9bf0] transition-colors group">
+                    <svg viewBox="0 0 24 24" className="w-9 h-9 fill-[#3d4147] group-hover:fill-[#1d9bf0] transition-colors">
+                      <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
+                    </svg>
+                    <div className="text-center px-4">
+                      <p className="text-[14px] text-[#71767b] group-hover:text-[#e7e9ea] transition-colors truncate max-w-xs">
+                        {excelFileName || "파일을 클릭하거나 드래그해서 업로드"}
+                      </p>
+                      <p className="text-[12px] text-[#3d4147] mt-0.5">.xlsx / .xls / .csv 지원</p>
+                    </div>
+                    <input type="file" accept=".xlsx,.xls,.csv" onChange={handleFileUpload} className="hidden" />
+                  </label>
+                </div>
+
+                {/* 2. Sheet selector */}
+                {excelSheets.length > 0 && (
+                  <div>
+                    <p className="text-[13px] text-[#71767b] font-medium mb-2">② 시트 선택</p>
+                    <select
+                      value={selectedSheet}
+                      onChange={(e) => handleSheetChange(e.target.value)}
+                      className={selectCls}
+                    >
+                      {excelSheets.map((s) => (
+                        <option key={s} value={s}>{s}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* 3. Column selector */}
+                {excelColumns.length > 0 && (
+                  <div>
+                    <p className="text-[13px] text-[#71767b] font-medium mb-2">③ 이름 컬럼 선택</p>
+                    <select
+                      value={selectedColumn}
+                      onChange={(e) => { setSelectedColumn(e.target.value); setExcelLoaded(false); setExcelParticipants([]); }}
+                      className={selectCls}
+                    >
+                      {excelColumns.map((col) => (
+                        <option key={col} value={col}>{col}</option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                {/* 4. Apply button */}
+                {excelColumns.length > 0 && (
+                  <button
+                    onClick={applyExcel}
+                    className="w-full bg-[#1d9bf0] text-white font-semibold py-2.5 rounded-xl text-[14px] hover:bg-[#1a8cd8] transition-colors"
+                  >
+                    적용
+                  </button>
+                )}
+
+                {/* 5. Preview */}
+                {excelLoaded && excelParticipants.length > 0 && (
+                  <div className="space-y-2">
+                    <div className="flex items-center justify-between px-4 py-2.5 bg-[#0a0a0a] border border-[#2f3336] rounded-xl">
+                      <span className="text-[13px] text-[#71767b] truncate mr-2">
+                        {selectedSheet} · {selectedColumn}
+                      </span>
+                      <span className="text-[#1d9bf0] text-[14px] font-bold shrink-0">
+                        총 {excelParticipants.length.toLocaleString()}명
+                      </span>
+                    </div>
+                    <div className="bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-4 py-3 space-y-1.5">
+                      <p className="text-[11px] text-[#3d4147] mb-2 font-medium">미리보기</p>
+                      {excelParticipants.slice(0, 5).map((p, i) => (
+                        <div key={p.id} className="flex items-center gap-2">
+                          <span className="text-[11px] text-[#3d4147] w-5 shrink-0">{i + 1}</span>
+                          <span className="text-[13px] text-[#e7e9ea] truncate">{p.name}</span>
+                        </div>
+                      ))}
+                      {excelParticipants.length > 5 && (
+                        <p className="text-[12px] text-[#3d4147] pt-1">외 {(excelParticipants.length - 5).toLocaleString()}명...</p>
+                      )}
+                    </div>
+                  </div>
+                )}
+
+                {error && (
+                  <div className="bg-[#200a0a] border border-[#5c1d1d] rounded-xl px-4 py-3 text-[#f44336] text-[14px]">{error}</div>
+                )}
+
+                <button
+                  onClick={goToLoaded}
+                  disabled={!canDraw}
+                  className="w-full bg-white text-black font-bold py-3 rounded-xl text-[15px] hover:bg-[#e7e9ea] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
+                >
+                  추첨 설정으로 이동
+                </button>
+              </div>
+            )}
           </div>
         )}
 
         {/* STEP: LOADED */}
         {step === "loaded" && (
           <div className="w-full max-w-xl animate-fade-up">
-            {/* Loaded tweets summary */}
             <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-5 mb-4 space-y-3">
-              <p className="text-[13px] text-[#71767b] font-medium">불러온 트윗</p>
-              {tweetInfos.filter(Boolean).map((info, i) => (
-                <div key={i} className="flex items-start gap-3">
-                  {info!.author?.profile_image_url ? (
-                    // eslint-disable-next-line @next/next/no-img-element
-                    <img src={info!.author.profile_image_url} alt="" className="w-8 h-8 rounded-full shrink-0 mt-0.5" />
-                  ) : (
-                    <div className="w-8 h-8 rounded-full bg-[#2f3336] shrink-0 mt-0.5" />
-                  )}
+              <p className="text-[13px] text-[#71767b] font-medium">추첨 대상</p>
+
+              {mode === "twitter" ? (
+                tweetInfos.filter(Boolean).map((info, i) => (
+                  <div key={i} className="flex items-start gap-3">
+                    {info!.author?.profile_image_url ? (
+                      // eslint-disable-next-line @next/next/no-img-element
+                      <img src={info!.author.profile_image_url} alt="" className="w-8 h-8 rounded-full shrink-0 mt-0.5" />
+                    ) : (
+                      <div className="w-8 h-8 rounded-full bg-[#2f3336] shrink-0 mt-0.5" />
+                    )}
+                    <div className="flex-1 min-w-0">
+                      <p className="text-[14px] font-semibold">
+                        {info!.author ? `@${info!.author.username}` : `트윗 ${i + 1}`}
+                      </p>
+                      <p className="text-[13px] text-[#71767b] truncate">{info!.tweetText.slice(0, 60)}…</p>
+                    </div>
+                    <span className="bg-[#1d9bf01a] text-[#1d9bf0] text-[12px] font-semibold px-2 py-0.5 rounded-full shrink-0">
+                      {info!.total.toLocaleString()}명
+                    </span>
+                  </div>
+                ))
+              ) : (
+                <div className="flex items-center gap-3">
+                  <div className="w-8 h-8 rounded-full bg-[#1d9bf01a] flex items-center justify-center shrink-0">
+                    <svg viewBox="0 0 24 24" className="w-4 h-4 fill-[#1d9bf0]">
+                      <path d="M14 2H6c-1.1 0-1.99.9-1.99 2L4 20c0 1.1.89 2 1.99 2H18c1.1 0 2-.9 2-2V8l-6-6zm2 16H8v-2h8v2zm0-4H8v-2h8v2zm-3-5V3.5L18.5 9H13z" />
+                    </svg>
+                  </div>
                   <div className="flex-1 min-w-0">
-                    <p className="text-[14px] font-semibold">
-                      {info!.author ? `@${info!.author.username}` : `트윗 ${i + 1}`}
-                    </p>
-                    <p className="text-[13px] text-[#71767b] truncate">{info!.tweetText.slice(0, 60)}…</p>
+                    <p className="text-[14px] font-semibold truncate">{excelFileName}</p>
+                    <p className="text-[13px] text-[#71767b]">{selectedSheet} · {selectedColumn} 컬럼</p>
                   </div>
                   <span className="bg-[#1d9bf01a] text-[#1d9bf0] text-[12px] font-semibold px-2 py-0.5 rounded-full shrink-0">
-                    {info!.total.toLocaleString()}명
+                    {excelParticipants.length.toLocaleString()}명
                   </span>
                 </div>
-              ))}
+              )}
+
               <div className="border-t border-[#2f3336] pt-3 flex justify-between items-center">
-                <span className="text-[13px] text-[#71767b]">
-                  합산 총원
-                </span>
-                <span className="text-[#e7e9ea] text-[15px] font-bold">
-                  {allRetweeters.length.toLocaleString()}명
-                </span>
+                <span className="text-[13px] text-[#71767b]">합산 총원</span>
+                <span className="text-[#e7e9ea] text-[15px] font-bold">{allParticipants.length.toLocaleString()}명</span>
               </div>
             </div>
 
-            {/* Winner count */}
             <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-5 mb-4">
-              <label className="block text-[13px] text-[#71767b] mb-3 font-medium">
-                추첨 인원
-              </label>
+              <label className="block text-[13px] text-[#71767b] mb-3 font-medium">추첨 인원</label>
               <div className="flex items-center gap-3">
                 <button
                   onClick={() => setWinnerCount(Math.max(1, winnerCount - 1))}
                   className="w-10 h-10 rounded-full border border-[#2f3336] flex items-center justify-center hover:bg-[#2f3336] transition-colors text-lg font-bold"
-                >
-                  −
-                </button>
+                >−</button>
                 <input
                   type="number"
                   min={1}
-                  max={allRetweeters.length}
+                  max={allParticipants.length}
                   value={winnerCount}
                   onChange={(e) =>
-                    setWinnerCount(Math.min(allRetweeters.length, Math.max(1, parseInt(e.target.value) || 1)))
+                    setWinnerCount(Math.min(allParticipants.length, Math.max(1, parseInt(e.target.value) || 1)))
                   }
                   className="w-20 bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-3 py-2 text-center text-[18px] font-bold focus:outline-none focus:border-[#1d9bf0]"
                 />
                 <button
-                  onClick={() => setWinnerCount(Math.min(allRetweeters.length, winnerCount + 1))}
+                  onClick={() => setWinnerCount(Math.min(allParticipants.length, winnerCount + 1))}
                   className="w-10 h-10 rounded-full border border-[#2f3336] flex items-center justify-center hover:bg-[#2f3336] transition-colors text-lg font-bold"
-                >
-                  +
-                </button>
-                <span className="text-[#71767b] text-[13px]">/ {allRetweeters.length.toLocaleString()}명</span>
+                >+</button>
+                <span className="text-[#71767b] text-[13px]">/ {allParticipants.length.toLocaleString()}명</span>
               </div>
             </div>
 
@@ -367,7 +570,7 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
               <div className="w-16 h-16 rounded-full border-4 border-[#1d9bf0] border-t-transparent animate-spin" />
               <div>
                 <p className="text-[#71767b] text-[14px] mb-2">추첨 중...</p>
-                <p className="text-[22px] font-bold min-h-[32px] animate-roll">{rollingName}</p>
+                <p className="text-[22px] font-bold min-h-[32px]">{rollingName}</p>
               </div>
             </div>
           </div>
@@ -379,7 +582,7 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
             <div className="text-center mb-6">
               <h2 className="text-[24px] font-bold mb-1">추첨 완료!</h2>
               <p className="text-[#71767b] text-[14px]">
-                {allRetweeters.length.toLocaleString()}명 중 {winners.length}명이 선정되었습니다
+                {allParticipants.length.toLocaleString()}명 중 {winners.length}명이 선정되었습니다
               </p>
             </div>
 
@@ -387,7 +590,7 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
               {winners.map((w, i) => (
                 <div
                   key={w.id}
-                  className="bg-[#16181c] border border-[#1d9bf0]/30 rounded-2xl p-4 flex items-center gap-4 animate-winner-glow"
+                  className="bg-[#16181c] border border-[#1d9bf0]/30 rounded-2xl p-4 flex items-center gap-4"
                   style={{ animationDelay: `${i * 0.15}s` }}
                 >
                   <div className="w-8 h-8 rounded-full bg-[#1d9bf0] flex items-center justify-center text-white font-bold text-[14px] shrink-0">
@@ -405,14 +608,18 @@ const selected = pool.slice(0, count).map((u, i) => ({ ...u, rank: i + 1 }));
                   )}
                   <div className="flex-1 min-w-0">
                     <p className="font-bold text-[15px] truncate">{w.name}</p>
-                    <a
-                      href={`https://x.com/${w.username}`}
-                      target="_blank"
-                      rel="noopener noreferrer"
-                      className="text-[#1d9bf0] text-[13px] hover:underline truncate block"
-                    >
-                      @{w.username}
-                    </a>
+                    {w.username ? (
+                      <a
+                        href={`https://x.com/${w.username}`}
+                        target="_blank"
+                        rel="noopener noreferrer"
+                        className="text-[#1d9bf0] text-[13px] hover:underline truncate block"
+                      >
+                        @{w.username}
+                      </a>
+                    ) : (
+                      <p className="text-[#71767b] text-[13px]">엑셀 추첨</p>
+                    )}
                   </div>
                   <svg viewBox="0 0 24 24" className="w-5 h-5 fill-[#ffd700] shrink-0">
                     <path d="M12 2l3.09 6.26L22 9.27l-5 4.87 1.18 6.88L12 17.77l-6.18 3.25L7 14.14 2 9.27l6.91-1.01L12 2z" />
