@@ -1,7 +1,8 @@
 "use client";
 
-import { useState, useRef } from "react";
+import { useState, useRef, useEffect } from "react";
 import * as XLSX from "xlsx";
+import Link from "next/link";
 
 interface Participant {
   id: string;
@@ -51,6 +52,46 @@ export default function Home() {
   const [rollingName, setRollingName] = useState("");
   const intervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
 
+  // Twitter auth (유료 API 보호)
+  const [authed, setAuthed] = useState<boolean | null>(null);
+  const [password, setPassword] = useState("");
+  const [authError, setAuthError] = useState("");
+  const [authLoading, setAuthLoading] = useState(false);
+
+  useEffect(() => {
+    fetch("/api/auth")
+      .then((r) => r.json())
+      .then((d) => setAuthed(!!d.authed))
+      .catch(() => setAuthed(false));
+  }, []);
+
+  async function login() {
+    if (!password) return;
+    setAuthLoading(true);
+    setAuthError("");
+    try {
+      const res = await fetch("/api/auth", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ password }),
+      });
+      const data = await res.json();
+      if (!res.ok) { setAuthError(data.error || "인증에 실패했습니다."); return; }
+      setAuthed(true);
+      setPassword("");
+    } catch {
+      setAuthError("네트워크 오류가 발생했습니다.");
+    } finally {
+      setAuthLoading(false);
+    }
+  }
+
+  async function logout() {
+    await fetch("/api/auth", { method: "DELETE" }).catch(() => {});
+    setAuthed(false);
+    reset();
+  }
+
   // ── Twitter handlers ──────────────────────────────────────────
   function addUrl() {
     setTweetUrls((p) => [...p, ""]);
@@ -79,6 +120,7 @@ export default function Home() {
         body: JSON.stringify({ tweetUrl: url }),
       });
       const data = await res.json();
+      if (data.needAuth) { setAuthed(false); return; }
       if (!res.ok) { setError(data.error || "오류가 발생했습니다."); return; }
       if (data.total === 0) { setError(`트윗 ${index + 1}: 리트윗한 사람이 없습니다.`); return; }
       setTweetInfos((p) => p.map((t, i) => (i === index ? data : t)));
@@ -235,6 +277,12 @@ export default function Home() {
           <path d="M18.244 2.25h3.308l-7.227 8.26 8.502 11.24H16.17l-4.714-6.231-5.401 6.231H2.746l7.73-8.835L1.254 2.25H8.08l4.259 5.63zm-1.161 17.52h1.833L7.084 4.126H5.117z" />
         </svg>
         <span className="text-[15px] font-semibold">추첨기</span>
+        <Link
+          href="/sheets"
+          className="ml-auto text-[13px] text-[#71767b] hover:text-[#e7e9ea] px-3 py-1.5 rounded-full hover:bg-[#16181c] transition-colors"
+        >
+          구글시트 추첨기 →
+        </Link>
       </header>
 
       <main className="flex-1 flex flex-col items-center justify-center px-4 py-12">
@@ -272,8 +320,52 @@ export default function Home() {
               </button>
             </div>
 
+            {/* ── Twitter lock ── */}
+            {mode === "twitter" && authed !== true && (
+              <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-6 space-y-4">
+                {authed === null ? (
+                  <div className="flex justify-center py-6">
+                    <div className="w-6 h-6 rounded-full border-2 border-[#1d9bf0] border-t-transparent animate-spin" />
+                  </div>
+                ) : (
+                  <>
+                    <div className="flex flex-col items-center text-center gap-2 pt-2">
+                      <div className="w-12 h-12 rounded-full bg-[#1d9bf01a] flex items-center justify-center">
+                        <svg viewBox="0 0 24 24" className="w-6 h-6 fill-[#1d9bf0]">
+                          <path d="M18 8h-1V6c0-2.76-2.24-5-5-5S7 3.24 7 6v2H6c-1.1 0-2 .9-2 2v10c0 1.1.9 2 2 2h12c1.1 0 2-.9 2-2V10c0-1.1-.9-2-2-2zm-6 9c-1.1 0-2-.9-2-2s.9-2 2-2 2 .9 2 2-.9 2-2 2zM9 8V6c0-1.66 1.34-3 3-3s3 1.34 3 3v2H9z" />
+                        </svg>
+                      </div>
+                      <p className="text-[16px] font-semibold">비밀번호가 필요해요</p>
+                      <p className="text-[13px] text-[#71767b]">트위터 추첨은 API 비용이 들어서 비밀번호로 보호돼요.<br />엑셀 파일 추첨은 바로 쓸 수 있어요.</p>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="password"
+                        value={password}
+                        onChange={(e) => setPassword(e.target.value)}
+                        onKeyDown={(e) => e.key === "Enter" && login()}
+                        placeholder="비밀번호"
+                        autoFocus
+                        className="flex-1 bg-[#0a0a0a] border border-[#2f3336] rounded-xl px-4 py-3 text-[15px] placeholder-[#3d4147] focus:outline-none focus:border-[#1d9bf0] transition-colors"
+                      />
+                      <button
+                        onClick={login}
+                        disabled={authLoading || !password}
+                        className="px-5 bg-[#1d9bf0] text-white rounded-xl text-[14px] font-semibold hover:bg-[#1a8cd8] transition-colors disabled:opacity-40 disabled:cursor-not-allowed shrink-0"
+                      >
+                        {authLoading ? "확인 중..." : "확인"}
+                      </button>
+                    </div>
+                    {authError && (
+                      <div className="bg-[#200a0a] border border-[#5c1d1d] rounded-xl px-4 py-3 text-[#f44336] text-[14px]">{authError}</div>
+                    )}
+                  </>
+                )}
+              </div>
+            )}
+
             {/* ── Twitter input ── */}
-            {mode === "twitter" && (
+            {mode === "twitter" && authed === true && (
               <div className="bg-[#16181c] border border-[#2f3336] rounded-2xl p-6 space-y-3">
                 <label className="block text-[13px] text-[#71767b] font-medium">트윗 URL 또는 ID</label>
 
@@ -365,6 +457,12 @@ export default function Home() {
                   className="w-full bg-white text-black font-bold py-3 rounded-xl text-[15px] hover:bg-[#e7e9ea] transition-colors disabled:opacity-40 disabled:cursor-not-allowed"
                 >
                   추첨 설정으로 이동
+                </button>
+                <button
+                  onClick={logout}
+                  className="w-full text-[#71767b] text-[12px] hover:text-[#e7e9ea] transition-colors"
+                >
+                  잠금
                 </button>
               </div>
             )}

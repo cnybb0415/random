@@ -1,4 +1,5 @@
 import { NextRequest, NextResponse } from "next/server";
+import { isAuthed } from "@/lib/twitterAuth";
 
 const BEARER_TOKEN = process.env.TWITTER_BEARER_TOKEN;
 
@@ -22,6 +23,10 @@ function extractTweetId(input: string): string | null {
 }
 
 export async function POST(req: NextRequest) {
+  if (!isAuthed(req)) {
+    return NextResponse.json({ error: "비밀번호 인증이 필요합니다.", needAuth: true }, { status: 401 });
+  }
+
   try {
     const { tweetUrl } = await req.json();
 

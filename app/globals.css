@@ -54,3 +54,12 @@ body {
 .animate-roll {
   animation: roll 0.15s ease infinite;
 }
+
+@keyframes sheet-progress {
+  from { width: 0%; }
+  to { width: 100%; }
+}
+
+.animate-sheet-progress {
+  animation: sheet-progress linear forwards;
+}
